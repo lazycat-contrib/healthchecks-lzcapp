@@ -1,0 +1,131 @@
+name: Verify Healthchecks Release on GitHub
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to verify
+        required: false
+        default: v5.0.3
+permissions:
+  contents: read
+concurrency:
+  group: healthchecks-release-verification
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG="$(gh release view --json tagName --jq .tagName)"; fi
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Download exact Release asset on runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ASSET_NAME="community.lazycat.app.healthchecks-${RELEASE_TAG}.lpk"
+          echo "ASSET_NAME=$ASSET_NAME" >> "$GITHUB_ENV"
+          gh release view "$RELEASE_TAG" --json tagName,assets > release-metadata.json
+          gh release download "$RELEASE_TAG" --pattern "$ASSET_NAME" --dir verify-pkg
+
+      - name: Verify package contents
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, tarfile, yaml
+
+          tag = os.environ['RELEASE_TAG']
+          name = os.environ['ASSET_NAME']
+          pkg = __import__('pathlib').Path('verify-pkg') / name
+          assert pkg.is_file(), pkg
+
+          h = hashlib.sha256()
+          with pkg.open('rb') as fh:
+              for chunk in iter(lambda: fh.read(1 << 20), b''):
+                  h.update(chunk)
+
+          with tarfile.open(pkg, 'r:') as package:
+              members = package.getnames()
+              for required in ('manifest.yml', 'package.yml', 'content.tar', 'icon.png'):
+                  assert required in members, (required, members)
+
+              info = yaml.safe_load(package.extractfile('package.yml').read())
+              assert info['package'] == 'community.lazycat.app.healthchecks', info['package']
+              assert info['name'] == 'Healthchecks', info['name']
+              assert info['version'] == tag.lstrip('v'), (info['version'], tag)
+              assert info['license'] == 'BSD-3-Clause', info['license']
+              assert info['min_os_version'] == '1.5.0', info['min_os_version']
+
+              m = yaml.safe_load(package.extractfile('manifest.yml').read())
+              app = m['application']
+              assert app['subdomain'] == 'healthchecks', app['subdomain']
+              ups = app['upstreams']
+              assert any(u['location'] == '/' and u['backend'] == 'http://healthchecks:8000/' for u in ups), ups
+
+              svcs = m['services']
+              assert set(svcs) == {'healthchecks', 'db', 'redis'}, set(svcs)
+
+              appsvc = svcs['healthchecks']
+              assert 'healthchecks/healthchecks' in appsvc['image'], appsvc['image']
+              assert appsvc['image'].endswith(':' + tag), appsvc['image']
+
+              # custom entrypoint must seed the superuser
+              ep = appsvc.get('entrypoint')
+              assert ep and any('create-admin.sh' in str(x) for x in ep), ep
+
+              env = ' '.join(appsvc['environment'])
+              assert 'DB=postgres' in env, env
+              assert 'DB_HOST=db' in env, env
+              assert 'SECRET_KEY=' in env, env
+              assert 'REGISTRATION_OPEN=False' in env, env
+              assert 'HC_ADMIN_EMAIL' in env and 'HC_ADMIN_PASSWORD' in env, env
+              assert 'stable_secret' in env, env
+
+              db = svcs['db']
+              assert 'postgres:16' in db['image'], db['image']
+              assert 'healthcheck' in db
+              assert 'stable_secret' in ' '.join(db['environment'])
+
+              redis = svcs['redis']
+              assert 'redis:7' in redis['image'], redis['image']
+              assert 'healthcheck' in redis
+
+              assert any(b.endswith(':/var/lib/postgresql/data') for b in db['binds']), db['binds']
+              assert any(b.endswith(':/data') for b in redis['binds']), redis['binds']
+
+              params = yaml.safe_load(package.extractfile('deploy_params.yml').read())
+              by_id = {q['id']: q for q in params['params']}
+              assert set(by_id) == {'admin_email', 'admin_password'}, set(by_id)
+              assert by_id['admin_password']['type'] == 'secret'
+              assert 'random' in str(by_id['admin_password'].get('default_value', ''))
+
+              assert 'healthcheck' not in appsvc, appsvc
+              text = package.extractfile('manifest.yml').read().decode()
+              assert 'lzc-file-chooser' not in text
+
+              with tarfile.open(fileobj=package.extractfile('content.tar')) as content:
+                  cmembers = content.getnames()
+                  lic = [n for n in cmembers if 'licenses/' in n]
+                  assert lic, cmembers
+                  texts = []
+                  for n in lic:
+                      texts.append(content.extractfile(n).read().decode())
+                  joined = '\n'.join(texts)
+              assert 'BSD' in joined or 'Redistribution and use' in joined
+
+          result = {
+              'verified': True,
+              'tag': tag,
+              'sha256': h.hexdigest(),
+              'size': pkg.stat().st_size,
+              'runtime_tested': False,
+          }
+          print(json.dumps(result))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('```json\n' + json.dumps(result, indent=2) + '\n```\n')
+          PY
