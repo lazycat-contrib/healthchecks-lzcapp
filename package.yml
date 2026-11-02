@@ -1,0 +1,18 @@
+package: community.lazycat.app.healthchecks
+name: Healthchecks
+version: 0.0.0
+description: "Cron job and background task monitoring: get alerted when your scheduled jobs do not run."
+min_os_version: "1.5.0"
+homepage: https://github.com/healthchecks/healthchecks
+author: Healthchecks
+license: BSD-3-Clause
+permissions:
+  required:
+    - net.internet
+locales:
+  zh:
+    name: Healthchecks
+    description: "定时任务监控：给每个 cron 任务一个检查地址，按时上报就正常，超时没上报就发警报到邮箱或 webhook。"
+  en:
+    name: Healthchecks
+    description: "Cron job and background task monitoring: get alerted when your scheduled jobs do not run."

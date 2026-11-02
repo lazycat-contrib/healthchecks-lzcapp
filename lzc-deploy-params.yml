@@ -1,0 +1,21 @@
+params:
+  - id: admin_email
+    type: string
+    name: Admin email
+    description: "Email for the first superuser account. Also the login identity."
+    default_value: "admin@example.com"
+    optional: false
+  - id: admin_password
+    type: secret
+    name: Admin password
+    description: "Password for the superuser, at least 12 characters. Re-applied on every container start."
+    default_value: "$random(len=20)"
+    optional: false
+locales:
+  zh:
+    admin_email:
+      name: 管理员邮箱
+      description: 第一个超级用户的邮箱，同时也是登录账号。
+    admin_password:
+      name: 管理员密码
+      description: 超级用户密码，至少 12 位。每次容器启动都会重新写入，保证与部署参数一致。

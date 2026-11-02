@@ -1,0 +1,109 @@
+application:
+  subdomain: healthchecks
+  multi_instance: false
+  upstreams:
+    - location: /package-licenses/
+      backend: file:///lzcapp/pkg/content/licenses/
+    - location: /
+      backend: http://healthchecks:8000/
+
+services:
+  db:
+    image: docker.1ms.run/library/postgres:16-alpine
+    environment:
+      - POSTGRES_DB=hc
+      - POSTGRES_USER=postgres
+      - |-
+        POSTGRES_PASSWORD={{ stable_secret "hc_db_password" | replace "\r" "" | replace "\n" "" }}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U postgres -d hc
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    binds:
+      - /lzcapp/var/pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: docker.1ms.run/library/redis:7-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    binds:
+      - /lzcapp/var/redisdata:/data
+
+  healthchecks:
+    # upstream: healthchecks/healthchecks:v5.0.3
+    image: docker.1ms.run/healthchecks/healthchecks:v5.0.3
+    depends_on:
+      - db
+      - redis
+    # The stock run.sh only migrates and starts gunicorn, so route through a
+    # small wrapper that seeds the superuser first.
+    entrypoint:
+      - /bin/sh
+      - /lzcapp/pkg/content/create-admin.sh
+    environment:
+      - GUNICORN_WORKERS=2
+      - GUNICORN_PORT=8000
+      - DB=postgres
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=hc
+      - DB_USER=postgres
+      - |-
+        DB_PASSWORD={{ stable_secret "hc_db_password" | replace "\r" "" | replace "\n" "" }}
+      - |-
+        SECRET_KEY={{ stable_secret "hc_secret_key" | replace "\r" "" | replace "\n" "" }}
+      - |-
+        ALLOWED_HOSTS={{ .S.AppDomain }}
+      - SITE_ROOT=https://{{ .S.AppDomain }}
+      - |-
+        SITE_NAME=Healthchecks
+      - |-
+        DEFAULT_FROM_EMAIL=healthchecks@{{ .S.AppDomain }}
+      - |-
+        ADMINS={{ .U.admin_email }}
+      - REGISTRATION_OPEN=False
+      - DEBUG=False
+      - REDIS_URL=redis://redis:6379/0
+      - |-
+        HC_ADMIN_EMAIL={{ .U.admin_email }}
+      - |-
+        HC_ADMIN_PASSWORD={{ .U.admin_password }}
+      - TZ=Asia/Shanghai
+    binds:
+      - /lzcapp/pkg/content:/lzcapp/pkg/content:ro
+
+usage: |
+  Healthchecks 是定时任务监控工具：给每个 cron 任务一个检查地址，按时上报算正常，超时没上报就告警。
+
+  使用方法：
+  1. 打开应用，用你在安装时填写的管理员邮箱和密码登录。
+  2. 新建一个检查（Check），设置周期（比如每天一次），拿到专属的 ping 地址。
+  3. 在 cron 任务末尾加一行 curl 请求那个地址；超时没请求就会标记为失败。
+
+  数据与安全：
+  - 数据库在 PostgreSQL（/lzcapp/var/pgdata），Redis 持久化在 /lzcapp/var/redisdata。
+    卸载应用会一并删除，请定期备份。
+  - 数据库密码和应用密钥由平台稳定密钥生成，每个部署不同，不写成固定值。
+  - 管理员邮箱和密码来自安装参数，每次启动会重新同步到账号，不存在内置弱口令。
+  - 注册已在服务端关闭（REGISTRATION_OPEN=False），只能由管理员在后台添加成员。
+  - 应用经懒猫入口鉴权访问。
+
+  说明：
+  - 本应用包含三个容器（Healthchecks + PostgreSQL + Redis），启动顺序由依赖关系保证。
+  - 未配置邮件服务，告警邮件发不出去；建议用应用内提供的 webhook 或第三方集成接收通知。
+  - 未做真机验证：登录、建检查、ping 上报、超时告警以及重启后持久化均未在设备上实测。
